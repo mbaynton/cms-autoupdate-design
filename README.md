@@ -2,9 +2,9 @@
 
 The purpose of this document is to form concensus around the technical decisions related to distributing and deploying automatic updates for PHP-based CMS software such as Drupal or Backdrop. There's a large bin of quality ideas on this topic at https://www.drupal.org/node/2367319, but the lack of concensus is probably hampering progress. My hope is that a single document updated via github pull requests will provide a clear picture of the plan and a controlled structure to amend it as better ideas are suggested.
 
-If you just have a quick observation or thought, post an issue here or a comment back at the d.o issue; if you have a revision to suggest, please feel free to submit a pull request. Revisions will be evaluated for merging based on whether they further the objectives outlined in the ***design concerns***. The design concerns are of course themselves up for amending as well...I've tried to gather all the distinct points that were raised in the d.o issue. The document is written in Markdown, if you're looking for an easy way to edit markdown for a PR try dillinger.io.
+If you just have a quick observation or thought, post an issue here or a comment back at the d.o issue; if you have a revision to suggest, please feel free to submit a pull request. If you would like to help take a leadership role in shaping this document, ask me about commit access. Although there is currently only one committer this is not an intentional dictatorship. Revisions will be evaluated for merging based on whether they further the objectives outlined in the ***design concerns***. The design concerns are of course themselves up for amending as well...I've tried to gather all the distinct points that were raised in the d.o issue. 
 
-If you would like to help take a leadership role in shaping this document, ask me about commit access. Although there is currently only one committer this is not an intentional dictatorship.
+The document is written in Markdown, if you're looking for an easy way to edit markdown for a PR try dillinger.io.
 
 ## Purpose of Automatic Updates
 Automatic updates are envisoned as a tool to mitigate the impact of security vulnerabilities in the CMS software, particularly those where sites would otherwise be compromised via automated exploits.
@@ -38,8 +38,20 @@ When an automatic update event is launched, the following exchanges occur betwee
   5. Central infrastructure sends the indicated update package. Although each update package contains an embedded OpenSSL-based signature ensuring the integrity and authenticity of the package, OpenSSL may not be available everywhere, so the message containing the update package is additionally signed with the rolling shared secret. This is likely weaker than OpenSSL, but renders tampering in transit infeasible.
   6. If site requires additional update packages from the index file, it responds with another name, else it responds it is done receiving update packages. In this case the exchange ends.
 
-
 ### Deployment
-Updates will be packaged as executable PHAR archives signed with OpenSSL.
-Discussion:
-  1. PHAR archives 
+Updates will be packaged as files that consist of a non-executable Phar archive with the archive's OpenSSL signature appended.
+
+Using Phar archives as the basis for packaging updates has these advantages:
+  - It is a full-featured archive format guaranteed to be readable by any server needing an update.
+  - The rich tooling for Phar examination and manipulation built into the interpreter and SPL would make deployment customization as easy as possible for advanced users.
+
+Phar archives natively support OpenSSL signing such that the interpreter refuses to open or run the Phar if the signature cannot be verified. Why not use it?
+  - The interpreter requires the user to place the corresponding public key for a signed archive in the same directory as the archive, and name the public key file identically to the archive with '.pubkey' appended ([Source](https://github.com/php/php-src/blob/323b2733f6b42d00dd86e77ac524d64f6ddc4e22/ext/phar/util.c#L1506), [Source 2](http://php.net/manual/en/phar.using.intro.php)). If this is not done, the archive cannot be used. This might not be a major issue for fully automated deployments, but for users that choose to acquire and deploy the update package manually this is inferior UX to the proposed design.
+  - Interpreters built without OpenSSL support simply refuse to open phar archives signed with OpenSSL. This conflicts with Design Concern 5.
+
+So instead, the update packages will be *almost* Phar archives, except that the OpenSSL signature will be appended to the end of the file. PHP code installed as part of the CMS will 
+
+To apply an update manually, one provides the update package to a drush subcommand or uploads it in site administration UI. In either case, if the interpreter has OpenSSL available the package is transparently verified against a public key distributed with the initial installation of the site -- no manual futzing of public key files.
+
+Update packages will run in three distinct phases. Normally the phases will all be executed in order, but the package will also support manual execution, and advanced users may choose to run the phases separately. In the first phase, the update is verified to be applicable to the site it is attempting to be applied to by comparing version numbers. In the second phase, updates to the code tree on the filesystem occur (file adds, modifications, and/or deletes.) In the third phase, a post-update script is run to perform tasks such as invoking database schema updates.
+
