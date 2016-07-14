@@ -25,33 +25,48 @@ In short, the Deployment will be accomplished via a PHAR archive signed with Ope
 
 ### Distribution
 In order to receive automatic updates, a site must opt in to receive them and register with a web service:
-  - the URL to an endpoint where updates and related messages will be transmitted.
-  - A seed for a PRNG generating at least 32-bit random values.
+  - the URL to an endpoint where updates and related messages will be sent.
+  - A randomly generated shared secret key.
 
-All messages exchanged between the central infrastructure and the site will be digitally signed using the current value of the PRNG as a shared secret. After each exchange, both ends increment their PRNG.
+For the endpoint to ensure messages being recieved are from the trusted central infrastructure, all messages exchanged between the central infrastructure and the site will be sent along with the HMAC result of the message using the shared secret key established during registration. To prevent replay attacks, each message will include a serial number that is incremented by one each time a message is sent.
 
 When an automatic update event is launched, the following exchanges occur between central infrastructure and each registered site:
-  1. Central infrastructure sends a short (signed with rolling shared secret) initialization message to the site's endpoint.
-  2. Site verifies message is authentic. If message exceeds the small expected size of the initialization message or if message signature is not verified, responds 403 and closes connection. If message is authentic, site issues a session token to central infrastructure. Further communications bearing a valid session token will have their signature verified even if the communication is large.
-  3. Central infrastructure sends an index file of update packages that are currently on offer, including the update's security risk score. Like all messages, the index file is signed with the rolling key, and the session token is also sent. The updates on offer could pertain to core or contrib, and could be offered as backports for previous versions.
+  1. Central infrastructure sends a short initialization message to the site's endpoint.
+  2. Site verifies message is authentic. If message exceeds the small expected size of the initialization message or if message HMAC is not verified, responds 403 and closes connection. If message is authentic, site issues a session token to central infrastructure. Further communications bearing a valid session token will have their signature verified even if the communication is large.
+  3. Central infrastructure sends an index file of update packages that are currently on offer, including the update's security risk score, now with the session token. The updates on offer could pertain to core or contrib, and could be offered as backports for previous versions, so there could potentially be several update packages. This index file makes it possilbe to offer many update packages simultaneously, without requiring sites to send central infrastructure detailed information about their installed modules/module versions or owner's thresholds for installing an update automatically.
   4. Site determines which of the offered updates it wishes to receive automtically based on which modules are installed, the security risk scores, and whether a backport to the currently installed version is available. If site wishes to receive one or more of the update packages, it responds with the name of the first. If site does not wish to further process any available updates, it responds it is done receiving update packages. In this case the exchange ends.
-  5. Central infrastructure sends the indicated update package. Although each update package contains an embedded OpenSSL-based signature ensuring the integrity and authenticity of the package, OpenSSL may not be available everywhere, so the message containing the update package is additionally signed with the rolling shared secret. This is likely weaker than OpenSSL, but renders tampering in transit infeasible.
+  5. Central infrastructure sends the indicated update package. Although each update package contains an embedded OpenSSL-based signature ensuring the integrity and authenticity of the package, OpenSSL may not be available everywhere, so the entirety of the message containing the update package is still sent with an HMAC.
   6. If site requires additional update packages from the index file, it responds with another name, else it responds it is done receiving update packages. In this case the exchange ends.
 
 ### Deployment
-Updates will be packaged as files that consist of a non-executable Phar archive with the archive's OpenSSL signature appended.
+Updates will be packaged as self-contained executable phar files signed with OpenSSL. Although they will be pushed by the distribution mechanism and could subsequently be executed by an automatic phar runner (see below), they are not tightly coupled to any specific distribution method and could be used as an alternative and safe way to manually apply an update as well, should site owners choose not to allow automatic updates.
 
 Using Phar archives as the basis for packaging updates has these advantages:
   - It is a full-featured archive format guaranteed to be readable by any server needing an update.
   - The rich tooling for Phar examination and manipulation built into the interpreter and SPL would make deployment customization as easy as possible for advanced users.
-
-Phar archives natively support OpenSSL signing such that the interpreter refuses to open or run the Phar if the signature cannot be verified. Why not use it?
-  - The interpreter requires the user to place the corresponding public key for a signed archive in the same directory as the archive, and name the public key file identically to the archive with '.pubkey' appended ([Source](https://github.com/php/php-src/blob/323b2733f6b42d00dd86e77ac524d64f6ddc4e22/ext/phar/util.c#L1506), [Source 2](http://php.net/manual/en/phar.using.intro.php)). If this is not done, the archive cannot be used. This might not be a major issue for fully automated deployments, but for users that choose to acquire and deploy the update package manually this is inferior UX to the proposed design.
-  - Interpreters built without OpenSSL support simply refuse to open phar archives signed with OpenSSL. This conflicts with Design Concern 5.
-
-So instead, the update packages will be *almost* Phar archives, except that the OpenSSL signature will be appended to the end of the file. PHP code installed as part of the CMS will 
-
-To apply an update manually, one provides the update package to a drush subcommand or uploads it in site administration UI. In either case, if the interpreter has OpenSSL available the package is transparently verified against a public key distributed with the initial installation of the site -- no manual futzing of public key files.
+  - For servers where PHP is linked with OpenSSL, the Phar format offers assurance that an update package is authentic and free of tampering through digital signatures. Based on popular linux distribution package dependencies for php, the vast majority of php installations probably do have OpenSSL support.
+  - The ability to package executable code - like an installer - with the patch itself offers the possibility to accomodate future needs within existing infrastructure. (`composer install`, anyone?)
 
 Update packages will run in three distinct phases. Normally the phases will all be executed in order, but the package will also support manual execution, and advanced users may choose to run the phases separately. In the first phase, the update is verified to be applicable to the site it is attempting to be applied to by comparing version numbers. In the second phase, updates to the code tree on the filesystem occur (file adds, modifications, and/or deletes.) In the third phase, a post-update script is run to perform tasks such as invoking database schema updates.
 
+Although the phar packages will, strictly speaking, be directly executable at the command line, this should not be a recommended/documented primary way to run them. The main reason for this is that it is impractical for users to verify that the particular phar they are about to execute contains an OpenSSL signature at all. When it does not, the par will be executed by the interpreter without question, so anyone in a position to tamper with the package could easily defeat the digital signature protection by simply removing it from the archive. (The extension ".phars" should totally be a thing, but that's another topic altogether.) Secondarily, in order to execute a properly signed phar from the command line, one needs to first copy the public key to a file in the same directory as the archive, named identical to the archive with .pubkey append, and that's just clunky.
+
+Instead, the recommended ways to open and execute phar update packages will be by calling a small bit of previously installed trusted code, passing it the phar file. This code could be invoked through drush or other command-line tools, as well as directly by the CMS. It will:
+  1. Check the php installation for OpenSSL support. If not present, 0 out the digitally signed feature flag from the update package to be run and set interpreter runtime value to phar.require_hash=0 long enough to open this package without any signature. (This seems the simplest way; we could alternatively skip the runtime config change by computing one of the hash-only signatures for the package and overwriting the OpenSSL signature with it.)
+  2. If OpenSSL support is present in this installation, verify that the update package to run is signed with OpenSSL. Abort if not.
+  3. Copy the public key from a known location within the CMS installation to the working directory where the phar is stored, and name it matching the .phar file's name per the interpreter's requirements.
+  4. Set the working directory to the root of the CMS installation to be updated.
+  5. Execute the phar.
+
+This model makes it as simple as possible to kick off the update code in a variety of ways with necessary OS permissions.
+
+### Reference implementations of automatic phar runner
+Two reference implementations that cause the phar to be executed following its distribution should be provided. One will target setups where the webserver is allowed to update the CMS code directly (WordPress' automatic updates  shows us this is prevalant among shared hosts), and another will target Unix-like OS's where the webserver does not have sufficient permission to modify the CMS source tree.
+
+The in-webserver runner should be trivial.
+
+The runner for the case where the webserver does not have permission to modify the CMS source will have these components:
+  1. A small amount of code within the CMS that responds to update package received events by connecting to a local socket and passing the update package through it, perhaps plus some metadata about the site it is coming from.
+  2. A daemon process that receives data on the local socket, calls the phar loader wrapper described above to verify the signature, and executes the phar.
+
+Under this model, the server administrator would need to do a one-time setup of the daemon, configuring it to run under a user allowed to edit the CMS source tree(s). One such daemon should be sufficient to update multiple CMS installations if desired by running as a priviliged process that forks and makes setuid/setgid calls.
