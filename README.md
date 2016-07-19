@@ -28,12 +28,10 @@ In order to receive automatic updates, a site must opt in to receive them and re
   - the URL to an endpoint where updates and related messages will be sent.
   - A randomly generated shared secret key.
 
-For the endpoint to ensure messages being recieved are from the trusted central infrastructure, all messages exchanged between the central infrastructure and the site will be sent along with the HMAC result of the message using the shared secret key established during registration. To prevent replay attacks, each message will include a serial number that is incremented by one each time a message is sent.
+For the endpoint to ensure messages being recieved are from the trusted central infrastructure, the Hawk HTTP authentication scheme will be used. Under Hawk, all messages exchanged between the central infrastructure and the site are be sent along with the message's sha-256 hash and an HMAC result computed over the hash using the shared secret key established during registration. Hawk also incorporates features to combat replay attacks.
 
 When an automatic update event is launched, the following exchanges occur between central infrastructure and each registered site:
-  1. Central infrastructure sends a short initialization message to the site's endpoint.
-  2. Site verifies message is authentic. If message exceeds the small expected size of the initialization message or if message HMAC is not verified, responds 403 and closes connection. If message is authentic, site issues a session token to central infrastructure. Further communications bearing a valid session token will have their signature verified even if the communication is large.
-  3. Central infrastructure sends an index file of update packages that are currently on offer, including the update's security risk score, now with the session token. The updates on offer could pertain to core or contrib, and could be offered as backports for previous versions, so there could potentially be several update packages. This index file makes it possilbe to offer many update packages simultaneously, without requiring sites to send central infrastructure detailed information about their installed modules/module versions or owner's thresholds for installing an update automatically.
+  1. Central infrastructure sends a notification of new updates to the site's endpoint. This notification consists of an index file of update packages that are currently on offer, including the update's security risk score. The updates on offer could pertain to core or contrib, and could be offered as backports for previous versions, so there could potentially be several update packages. This index file makes it possilbe to offer many update packages simultaneously, without requiring sites to send central infrastructure detailed information about their installed modules/module versions or owner's thresholds for installing an update automatically.
   4. Site determines which of the offered updates it wishes to receive automtically based on which modules are installed, the security risk scores, and whether a backport to the currently installed version is available. If site wishes to receive one or more of the update packages, it responds with the name of the first. If site does not wish to further process any available updates, it responds it is done receiving update packages. In this case the exchange ends.
   5. Central infrastructure sends the indicated update package. Although each update package contains an embedded OpenSSL-based signature ensuring the integrity and authenticity of the package, OpenSSL may not be available everywhere, so the entirety of the message containing the update package is still sent with an HMAC.
   6. If site requires additional update packages from the index file, it responds with another name, else it responds it is done receiving update packages. In this case the exchange ends.
@@ -60,8 +58,10 @@ Instead, the recommended ways to open and execute phar update packages will be b
 
 This model makes it as simple as possible to kick off the update code in a variety of ways with necessary OS permissions.
 
-### Reference implementations of automatic phar runner
-Two reference implementations that cause the phar to be executed following its distribution should be provided. One will target setups where the webserver is allowed to update the CMS code directly (WordPress' automatic updates  shows us this is prevalant among shared hosts), and another will target Unix-like OS's where the webserver does not have sufficient permission to modify the CMS source tree.
+### Automatic phar runner
+A separate module, the Trusted Installer, will manage execution of phar archives such that they are installed onto a site. Splitting this process into a separate module offers the potential to offer future support for one-click installation of contrib modules by site owners, without having to have their sites writable by the webserver and without having to deal with sftp credentials.
+
+Fundamentally, the Trusted Installer will be a public key repository, an API to run a phar on a particular site, and two implementations of the phar runner. One will target setups where the webserver is allowed to update the CMS code directly (WordPress' automatic updates  shows us this is prevalant among shared hosts), and another will target Unix-like OS's where the webserver does not have sufficient permission to modify the CMS source tree.
 
 The in-webserver runner should be trivial.
 
@@ -70,3 +70,5 @@ The runner for the case where the webserver does not have permission to modify t
   2. A daemon process that receives data on the local socket, calls the phar loader wrapper described above to verify the signature, and executes the phar.
 
 Under this model, the server administrator would need to do a one-time setup of the daemon, configuring it to run under a user allowed to edit the CMS source tree(s). One such daemon should be sufficient to update multiple CMS installations if desired by running as a priviliged process that forks and makes setuid/setgid calls.
+
+The key observation from a security standpoint is that the process with permission to adjust the site's source tree first performs its own verification that the changes to be made are from a trusted source.
